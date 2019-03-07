@@ -130,7 +130,7 @@ public class MatrixController {
 		// формируем ссылку для вызова метода print
 		String url = ServletUriComponentsBuilder.fromCurrentRequest().toUriString();
 		url = url.substring(0, url.indexOf(RestClient.BUY)) + RestClient.PRINT.replace("{order_id}", orderId);
-		return new ResponseEntity<>(new Response<Order>(new Order(url)), HttpStatus.OK);
+		return new ResponseEntity<>(new Response<Order>(new Order(url), true), HttpStatus.OK);
 	}
 
 	@GetMapping(RestClient.PRINT)

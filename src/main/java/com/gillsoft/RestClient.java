@@ -3,6 +3,7 @@ package com.gillsoft;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -17,10 +18,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Set;
-import java.util.StringJoiner;
 import java.util.UUID;
-import java.util.concurrent.Callable;
-import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -55,7 +53,6 @@ import com.gillsoft.cache.CacheHandler;
 import com.gillsoft.cache.IOCacheException;
 import com.gillsoft.cache.RedisMemoryCache;
 import com.gillsoft.concurrent.PoolType;
-import com.gillsoft.concurrent.ThreadPoolStore;
 import com.gillsoft.logging.SimpleRequestResponseLoggingInterceptor;
 import com.gillsoft.matrix.model.City;
 import com.gillsoft.matrix.model.Country;
@@ -71,7 +68,7 @@ import com.gillsoft.matrix.model.Response;
 import com.gillsoft.matrix.model.ReturnRule;
 import com.gillsoft.matrix.model.RouteInfo;
 import com.gillsoft.matrix.model.Seat;
-import com.gillsoft.matrix.model.Station;
+import com.gillsoft.matrix.model.Seats;
 import com.gillsoft.matrix.model.Ticket;
 import com.gillsoft.matrix.model.Trip;
 import com.gillsoft.model.Currency;
@@ -80,6 +77,7 @@ import com.gillsoft.model.Document;
 import com.gillsoft.model.IdentificationDocumentType;
 import com.gillsoft.model.Lang;
 import com.gillsoft.model.Locality;
+import com.gillsoft.model.Organisation;
 import com.gillsoft.model.RequiredField;
 import com.gillsoft.model.RestError;
 import com.gillsoft.model.Route;
@@ -156,7 +154,7 @@ public class RestClient {
 
 	private static final String MSG_ORDER_NOT_FOUND = "Order not found [order_id=%s]";
 	
-	private static final Map<String, Long> map = new HashMap<>();
+	private static final Map<String, Long> MATRIX_POINT_MAP = new HashMap<>();
 	
 	private static final String LOCALITY_TYPE_CITY = "6";
 
@@ -256,11 +254,11 @@ public class RestClient {
 	}
 
 	private RestTemplate createNewPoolingTemplate(String url, int requestTimeout) {
-		RestTemplate template = new RestTemplate(
+		RestTemplate restTemplate = new RestTemplate(
 				new BufferingClientHttpRequestFactory(RestTemplateUtil.createPoolingFactory(url, 300, requestTimeout)));
-		template.setInterceptors(Collections.singletonList(new SimpleRequestResponseLoggingInterceptor()));
-		template.setErrorHandler(new RestTemplateResponseErrorHandler());
-		return template;
+		restTemplate.setInterceptors(Collections.singletonList(new SimpleRequestResponseLoggingInterceptor()));
+		restTemplate.setErrorHandler(new RestTemplateResponseErrorHandler());
+		return restTemplate;
 	}
 
 /*	public ResponseEntity<Response<Object>> ping(String login, String password) {
@@ -405,7 +403,7 @@ public class RestClient {
 			localityList.stream().filter(locality -> LOCALITY_TYPE_CITY.equals(locality.getType()))
 					.forEach(locality -> {
 						City city = new City();
-						city.setId(Integer.valueOf(locality.getId()));
+						city.setId(Integer.valueOf(getMatrixCityId(locality.getId())));
 						if (locality.getLatitude() != null) {
 							city.setLatitude(locality.getLatitude().toString());
 						}
@@ -425,6 +423,14 @@ public class RestClient {
 			return new ResponseEntity<>(new Response<>(cities, true), HttpStatus.OK);
 		}
 		return new ResponseEntity<>(null, HttpStatus.NOT_FOUND);
+	}
+
+	private String getMatrixCityId(String localityId) {
+		String matrixCityId = Mapping.MAP.get(localityId);
+		if (matrixCityId != null) {
+			return matrixCityId;
+		}
+		return localityId;
 	}
 
 	/**
@@ -505,15 +511,16 @@ public class RestClient {
 				ArrayList<Trip> tripList = new ArrayList<>();
 				Lang lang = getLocaleLang(params);
 				final Map<String, Locality> localities = templateResponse.getBody().getLocalities();
-				templateResponse.getBody().getSegments().forEach(
-						(id, segment) -> tripList.add(createTrip(id, segment, lang, localities, login, password)));
+				TripSearchResponse tripSearchResponse = templateResponse.getBody();
+				templateResponse.getBody().getSegments().forEach((id, segment) -> tripList
+						.add(createTrip(id, segment, lang, tripSearchResponse, login, password)));
 				return new ResponseEntity<>(new Response<>(tripList, true), HttpStatus.OK);
 			}
 		}
 		return new ResponseEntity<>(new Response<>(new ArrayList<>(), true), HttpStatus.OK);
 	}
 	
-	private Trip createTrip(String id, Segment segment, Lang lang, Map<String, Locality> localities, String login,
+	private Trip createTrip(String id, Segment segment, Lang lang, TripSearchResponse tripSearchResponse, String login,
 			String password) {
 		Trip trip = new Trip();
 		trip.setTripId(id);
@@ -521,17 +528,19 @@ public class RestClient {
 		trip.setRouteId(segment.getRoute().getId());
 		trip.setRouteCode(segment.getRoute().getName(lang));
 		trip.setDepartDate(DateUtils.truncate(segment.getDepartureDate(), Calendar.DATE));
-		trip.setDepartTime(StringUtil.timeFormat.format(segment.getDepartureDate()));
+		trip.setDepartTime(StringUtil.timeFormat.format(segment.getDepartureDate()) + ":00");
 		trip.setArriveDate(DateUtils.truncate(segment.getArrivalDate(), Calendar.DATE));
-		trip.setArriveTime(StringUtil.timeFormat.format(segment.getArrivalDate()));
+		trip.setArriveTime(StringUtil.timeFormat.format(segment.getArrivalDate()) + ":00");
 		trip.setDepartStationId(segment.getDeparture().getId());
-		trip.setDepartStation(getLocalityName(localities, trip.getDepartStationId(), lang));
+		trip.setDepartStation(getLocalityName(tripSearchResponse.getLocalities(), trip.getDepartStationId(), lang));
 		trip.setArriveStationId(segment.getArrival().getId());
-		trip.setArriveStation(getLocalityName(localities, trip.getArriveStationId(), lang));
-		trip.setDepartCityId(getParentId(localities, trip.getDepartStationId()));
-		trip.setDepartCity(getLocalityName(localities, trip.getDepartCityId(), lang));
-		trip.setArriveCityId(getParentId(localities, trip.getArriveStationId()));
-		trip.setArriveCity(getLocalityName(localities, trip.getArriveCityId(), lang));
+		trip.setArriveStation(getLocalityName(tripSearchResponse.getLocalities(), trip.getArriveStationId(), lang));
+		String parentId = getParentId(tripSearchResponse.getLocalities(), trip.getDepartStationId());
+		trip.setDepartCityId(getMatrixCityId(parentId));
+		trip.setDepartCity(getLocalityName(tripSearchResponse.getLocalities(), parentId, lang));
+		parentId = getParentId(tripSearchResponse.getLocalities(), trip.getArriveStationId());
+		trip.setArriveCityId(getMatrixCityId(parentId));
+		trip.setArriveCity(getLocalityName(tripSearchResponse.getLocalities(), parentId, lang));
 		trip.setTimeInWay(segment.getTimeInWay());
 		trip.setTariff(segment.getPrice().getAmount());
 		trip.setPrice(new Price(segment.getPrice().getAmount(), segment.getPrice().getAmount()));
@@ -542,6 +551,19 @@ public class RestClient {
 			trip.setInternational(true);
 		}
 		trip.setDiscounts(getTripTariffs(trip.getTripId(), login, password, lang));
+		// перевозчик
+		if (segment.getCarrier() != null) {
+			trip.setCarrierCode(segment.getCarrier().getId());
+			Organisation carrier = tripSearchResponse.getOrganisations().get(trip.getCarrierCode());
+			if (carrier != null) {
+				trip.setCarrier(carrier.getName(lang));
+				trip.setCarrierName(trip.getCarrier());
+			}
+		}
+		trip.setFreeSeats(new Seats(getFreeSeats(login, password, lang.toString().toLowerCase(), id).getData()));
+		if (segment.getRoute().getPath() != null && !segment.getRoute().getPath().isEmpty()) {
+			trip.setDistance(segment.getRoute().getPath().stream().mapToInt(routePoint -> routePoint.getDistance()).max().getAsInt());
+		}
 		return trip;
 	}
  
@@ -556,9 +578,9 @@ public class RestClient {
 			/*TripIdModel trip = new TripIdModel().create(tripId);
 			cacheParams = getCacheParams(String.valueOf(trip.getResourceId()), 900000L, false);*/
 			cacheParams = getCacheParams("doc_fields_" + resourceId, 900000L, false);
-			Map<String, Boolean> map = (Map<String, Boolean>) memoryCache.read(cacheParams);
-			if (map != null) {
-				return map;
+			Map<String, Boolean> resultMap = (Map<String, Boolean>) memoryCache.read(cacheParams);
+			if (resultMap != null) {
+				return resultMap;
 			}
 		} catch (Exception e) {
 			LOGGER.error(e.getMessage(), e);
@@ -568,14 +590,14 @@ public class RestClient {
 						String.format(RestClientMethod.REQUIRED_FIELDS.getGdsUrl(), tripId), login, password),
 				requiredFieldTypeReference);
 		if (templateResponse != null && templateResponse.hasBody() && templateResponse.getBody() != null) {
-			Map<String, Boolean> map = templateResponse.getBody().stream()
+			Map<String, Boolean> resultMap = templateResponse.getBody().stream()
 					.collect(Collectors.toMap(key -> mapDocField(key), value -> Boolean.TRUE));
 			try {
-				memoryCache.write(map, cacheParams);
+				memoryCache.write(resultMap, cacheParams);
 			} catch (Exception e) {
 				LOGGER.error(e.getMessage(), e);
 			}
-			return map;
+			return resultMap;
 		}
 		return null;
 	}
@@ -661,7 +683,7 @@ public class RestClient {
 				getRequestEntity(null, RestClientMethod.TRIPS.getHttpMethod(),
 						String.format(RestClientMethod.TRIPS.getGdsUrl(), searchId), login, password),
 				tripSearchResponseTypeReference);
-		if (templateResponse != null && templateResponse.hasBody() && templateResponse.getBody() != null
+		if (templateResponse != null && templateResponse.hasBody() && templateResponse.getBody().getSegments() == null
 				&& templateResponse.getBody().getSearchId() != null) {
 			return getTrips(templateResponse.getBody().getSearchId(), login, password);
 		}
@@ -674,7 +696,8 @@ public class RestClient {
 		}
 		Locality locality = localities.get(localityId);
 		if (locality != null) {
-			return locality.getName(lang);
+			String address = locality.getAddress(lang);
+			return locality.getName(lang).trim() + (address == null ? "" : ", " + address);
 		}
 		return null;
 	}
@@ -685,6 +708,11 @@ public class RestClient {
 		}
 		Locality locality = localities.get(localityId);
 		if (locality != null && locality.getParent() != null) {
+			// костыль - добавляем родителя в основной список если его там нет
+			Locality parent = localities.get(locality.getParent().getId());
+			if (parent == null) {
+				localities.put(locality.getParent().getId(), locality.getParent());
+			}
 			return locality.getParent().getId();
 		}
 		return null;
@@ -731,7 +759,7 @@ public class RestClient {
 		pathPoint.setDepartTime(routePoint.getDepartureTime());
 		Geo geo = new Geo();
 		geo.setPoint(new Point());
-		geo.getPoint().setId(Integer.valueOf(routePoint.getLocality().getId()));
+		geo.getPoint().setId(Integer.valueOf(getMatrixCityId(routePoint.getLocality().getId())));
 		if (routePoint.getLocality().getLatitude() != null) {
 			geo.getPoint().setLatitude(routePoint.getLocality().getLatitude().toString());
 		}
@@ -904,10 +932,10 @@ public class RestClient {
 				seat.setId(params.getFirst("seat" + tripNoIndex));
 				serviceItem.setSeat(seat);
 			}
-			if (params.containsKey("discount" + tripNoIndex)) {
+			if (params.containsKey("discount_id" + tripNoIndex)) {
 				com.gillsoft.model.Price price = new com.gillsoft.model.Price();
 				price.setTariff(new com.gillsoft.model.Tariff());
-				price.getTariff().setId(params.getFirst("discount" + tripNoIndex));
+				price.getTariff().setId(params.getFirst("discount_id" + tripNoIndex));
 				serviceItem.setPrice(price);
 			}
 			orderRequest.getServices().add(serviceItem);
@@ -929,7 +957,6 @@ public class RestClient {
 			throw new RestClientException(orderResponse.getError().getMessage());
 		} else if (orderResponse.getServices() != null) {
 			String CONFIRM_ERROR = "CONFIRM_ERROR";
-			orderResponse.getServices().add(orderResponse.getServices().get(0));
 			if (orderResponse.getServices().size() == 1 && (orderResponse.getServices().get(0).getError() != null
 					|| CONFIRM_ERROR.equals(orderResponse.getServices().get(0).getStatus()))) {
 				throw new RestClientException("service id:" + orderResponse.getServices().get(0).getId() + " number:"
@@ -960,20 +987,31 @@ public class RestClient {
 		Order order = new Order();
 		order.setNumber(orderResponse.getOrderId());
 		order.setStatus(orderStatus);
-		setOrderPnoneEmail(order, orderResponse);
+		setOrderPhoneEmail(order, orderResponse);
 		order.setHash(getHash(orderResponse.getOrderId(), null));
-		orderResponse.getServices().forEach(service -> {
-			// добавляем билет в заказ
-			if (order.getTickets() == null) {
-				order.setTickets(new HashMap<>());
+		if (orderResponse.getServices() != null) {
+			orderResponse.getServices().forEach(service -> {
+				// добавляем билет в заказ
+				if (order.getTickets() == null) {
+					order.setTickets(new HashMap<>());
+				}
+				List<Ticket> ticketList = order.getTickets().get(service.getSegment().getId());
+				if (ticketList == null) {
+					ticketList = new ArrayList<>();
+					order.getTickets().put(service.getSegment().getId(), ticketList);
+				}
+				ticketList.add(getTicket(service, orderResponse, ticketStatus, lang));
+			});
+			if (order.getTickets() != null && !order.getTickets().isEmpty()) {
+				order.setCost(BigDecimal.valueOf(order.getTickets().values().stream()
+						.mapToDouble(list -> list.stream().mapToDouble(ticket -> ticket.getCost().doubleValue()).sum())
+						.sum()));
+				order.setPrice(BigDecimal.valueOf(order.getTickets().values().stream()
+						.mapToDouble(list -> list.stream().mapToDouble(ticket -> ticket.getPrice().doubleValue()).sum())
+						.sum()));
+				order.setCurrency(order.getTickets().values().iterator().next().get(0).getCurrency());
 			}
-			List<Ticket> ticketList = order.getTickets().get(service.getSegment().getId());
-			if (ticketList == null) {
-				ticketList = new ArrayList<>();
-				order.getTickets().put(service.getSegment().getId(), ticketList);
-			}
-			ticketList.add(getTicket(service, orderResponse, ticketStatus, lang));
-		});
+		}
 		order.setDocuments(orderResponse.getDocuments());
 		return order;
 	}
@@ -993,6 +1031,12 @@ public class RestClient {
 		if (service.getPrice() != null && service.getPrice().getTariff() != null) {
 			ticket.setCost(service.getPrice().getTariff().getValue());
 			ticket.setPrice(service.getPrice().getAmount());
+			ticket.setCurrency(service.getPrice().getCurrency().toString());
+			ticket.setVat(service.getPrice().getVat());
+			ticket.setVatRate(BigDecimal.ZERO);
+			ticket.setTariff(ticket.getCost());
+			ticket.setPathTariff(ticket.getCost());
+			ticket.setPathTariffCurrency(ticket.getCurrency());
 		}
 		if (service.getSeat() != null) {
 			ticket.setSeat(service.getSeat().getId());
@@ -1010,6 +1054,12 @@ public class RestClient {
 			ticket.setArriveAt(serviceSegment.getArrivalDate());
 			ticket.setGeoPointFrom(serviceSegment.getDeparture().getId());
 			ticket.setGeoPointTo(serviceSegment.getArrival().getId());
+			ticket.setGeoPointFromName(getLocalityName(orderResponse.getLocalities(), ticket.getGeoPointFrom(), lang));
+			ticket.setGeoPointToName(getLocalityName(orderResponse.getLocalities(), ticket.getGeoPointTo(), lang));
+			ticket.setGeoLocalityFrom(getParentId(orderResponse.getLocalities(), ticket.getGeoPointFrom()));
+			ticket.setGeoLocalityTo(getParentId(orderResponse.getLocalities(), ticket.getGeoPointTo()));
+			ticket.setGeoLocalityFromName(getLocalityName(orderResponse.getLocalities(), ticket.getGeoLocalityFrom(), lang));
+			ticket.setGeoLocalityToName(getLocalityName(orderResponse.getLocalities(), ticket.getGeoLocalityTo(), lang));
 			// условия возврата
 			if (serviceSegment.getPrice() != null && serviceSegment.getPrice().getTariff() != null
 					&& serviceSegment.getPrice().getTariff().getReturnConditions() != null
@@ -1041,20 +1091,25 @@ public class RestClient {
 		}
 	}
 
-	private void setOrderPnoneEmail(Order order, OrderResponse body) {
-		Iterator<Customer> iterator = body.getCustomers().values().stream().filter(customer -> customer.getPhone() != null && customer.getEmail() != null).iterator();
-		if (iterator.hasNext()) {
-			Customer customer = iterator.next();
-			order.setEmail(customer.getEmail());
-			order.setPhone(customer.getPhone());
-		} else {
-			iterator = body.getCustomers().values().stream().filter(customer -> customer.getEmail() != null).iterator();
+	private void setOrderPhoneEmail(Order order, OrderResponse body) {
+		if (body.getCustomers() != null && !body.getCustomers().isEmpty()) {
+			Iterator<Customer> iterator = body.getCustomers().values().stream()
+					.filter(customer -> customer.getPhone() != null && customer.getEmail() != null).iterator();
 			if (iterator.hasNext()) {
-				order.setEmail(iterator.next().getEmail());
-			}
-			iterator = body.getCustomers().values().stream().filter(customer -> customer.getPhone() != null).iterator();
-			if (iterator.hasNext()) {
-				order.setEmail(iterator.next().getPhone());
+				Customer customer = iterator.next();
+				order.setEmail(customer.getEmail());
+				order.setPhone(customer.getPhone());
+			} else {
+				iterator = body.getCustomers().values().stream().filter(customer -> customer.getEmail() != null)
+						.iterator();
+				if (iterator.hasNext()) {
+					order.setEmail(iterator.next().getEmail());
+				}
+				iterator = body.getCustomers().values().stream().filter(customer -> customer.getPhone() != null)
+						.iterator();
+				if (iterator.hasNext()) {
+					order.setEmail(iterator.next().getPhone());
+				}
 			}
 		}
 	}
@@ -1205,7 +1260,7 @@ public class RestClient {
 			checkOrderResponse(templateResponse.getBody());
 			return new ResponseEntity<>(
 					new Response<Order>(
-							getOrder(templateResponse.getBody(), orderStatus, ticketStatus, getLocaleLang(locale))),
+							getOrder(templateResponse.getBody(), orderStatus, ticketStatus, getLocaleLang(locale)), true),
 					HttpStatus.OK);
 		}
 		String msg = String.format(MSG_ORDER_NOT_FOUND, orderId);
@@ -1419,16 +1474,21 @@ public class RestClient {
 	}
 
 	private String getGdsPointIdByMatrixPointId(String matrixPointId) {
-		Long gdsId = map.get(matrixPointId);
+		Long gdsId = MATRIX_POINT_MAP.get(matrixPointId);
 		if (gdsId == null) {
-			ResponseEntity<List<com.gillsoft.model.mapper.Map>> mapResponse = mapperTemplate.exchange(getRequestEntityMapper(null, HttpMethod.GET,
-					String.format(MAP,  matrixPointId), null, null), mapperTypeReference);
-			if (mapResponse != null && mapResponse.hasBody() && !mapResponse.getBody().isEmpty()) {
-				map.put(matrixPointId, mapResponse.getBody().get(0).getId());
-				return String.valueOf(mapResponse.getBody().get(0).getId());
+			try {
+				ResponseEntity<List<com.gillsoft.model.mapper.Map>> mapResponse = mapperTemplate.exchange(
+						getRequestEntityMapper(null, HttpMethod.GET, String.format(MAP, matrixPointId), null, null),
+						mapperTypeReference);
+				if (mapResponse != null && mapResponse.hasBody() && !mapResponse.getBody().isEmpty()) {
+					MATRIX_POINT_MAP.put(matrixPointId, mapResponse.getBody().get(0).getId());
+					return String.valueOf(mapResponse.getBody().get(0).getId());
+				}
+			} catch (Exception e) {
 			}
+			return matrixPointId;
 		}
-		return matrixPointId;
+		return String.valueOf(gdsId);
 	}
 
 	public static void main(String[] args) {
@@ -1449,7 +1509,15 @@ public class RestClient {
 			seats.addAll(o);
 			System.out.println(o.toString());
 		}*/
-		System.out.println(new HashSet<String>(Arrays.asList(new String[] {"1", "2", "3"})));
+		/*System.out.println(new HashSet<String>(Arrays.asList("1", "2", "3")));
+		Object o = Arrays.asList(new String[][] { { "1", "2" } });
+		//o = new ArrayList<List<String>>(Arrays.asList("1", "2"));
+		//o.getClass().getDeclaredField("a").get(o)
+		System.out.println(o);*/
+		//
+		//byte b = (byte)0xf8;
+		//short s = (short)0xfffe;
+		System.out.println();
 	}
 
 }

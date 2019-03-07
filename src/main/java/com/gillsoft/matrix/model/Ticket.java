@@ -121,10 +121,10 @@ public class Ticket {
 	private String routeCode;
 	
 	@JsonProperty("path_from_index")
-	private int pathFromIndex;
+	private Integer pathFromIndex;
 	
 	@JsonProperty("path_to_index")
-	private int pathToIndex;
+	private Integer pathToIndex;
 	
 	@JsonProperty("geo_point_from_name")
 	private String geoPointFromName;
@@ -457,19 +457,19 @@ public class Ticket {
 		this.routeCode = routeCode;
 	}
 
-	public int getPathFromIndex() {
+	public Integer getPathFromIndex() {
 		return pathFromIndex;
 	}
 
-	public void setPathFromIndex(int pathFromIndex) {
+	public void setPathFromIndex(Integer pathFromIndex) {
 		this.pathFromIndex = pathFromIndex;
 	}
 
-	public int getPathToIndex() {
+	public Integer getPathToIndex() {
 		return pathToIndex;
 	}
 
-	public void setPathToIndex(int pathToIndex) {
+	public void setPathToIndex(Integer pathToIndex) {
 		this.pathToIndex = pathToIndex;
 	}
 

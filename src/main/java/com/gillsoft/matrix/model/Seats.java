@@ -14,6 +14,16 @@ public class Seats implements Serializable {
 	
 	private Map<String, String> list;
 	private int count;
+
+	public Seats() {
+
+	}
+
+	public Seats(Map<String, String> list) {
+		this.list = list;
+		if (list != null)
+			count = list.size();
+	}
 	
 	@JsonProperty("is_open")
 	private boolean open;
